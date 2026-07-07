@@ -1,0 +1,80 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== Virtual Environments =====
+venv/
+.venv/
+env/
+ENV/
+gazprom_env/
+Scripts/
+Lib/
+pyvenv.cfg
+
+# ===== IDE / Editors =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== Данные и артефакты ML =====
+# Большие бинарники и датасеты хранятся в artifacts/, но не коммитятся
+artifacts/datasets/
+
+# Исходные большие датасеты (opers.csv ~186MB, stpa5000.csv ~22MB и т.д.)
+# Файлы превышают лимит GitHub (100MB) — используйте DVC или внешнее хранилище
+Data/
+artifacts/models/
+artifacts/predictions/
+artifacts/logs/
+artifacts/tensorboard_runs/
+
+# Файлы данных
+*.npy
+*.dat
+*.pth
+*.keras
+*.pkl
+*.h5
+*.ckpt
+
+# Датасеты (CSV и текстовые массивы большого размера)
+input.txt
+labels.txt
+merged.dat
+predictions.csv
+X_data.npy
+y_data.npy
+
+# Excel и документы (при необходимости раскомментируйте)
+# *.xlsx
+# *.docx
+# *.pptx

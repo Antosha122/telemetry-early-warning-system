@@ -1,0 +1,50 @@
+# gazprom_emergency — конфигурация пайплайна прогноза аварий
+#
+# Все пути можно переопределять через переменные окружения:
+#   DATA_DIR, ARTIFACTS_DIR
+
+# ====== Пути к данным ======
+data:
+  # Каталог с исходными CSV (opers.csv, stpa.csv / stpa5000.csv)
+  source_dir: "${DATA_DIR}"
+  # Имена файлов
+  opers_file: "opers.csv"
+  stpa_file: "stpa.csv"
+  # Каталог для обработанных чанков и memmap
+  processed_dir: "${ARTIFACTS_DIR}/datasets/gazprom_emergency/processed"
+  # Размер чанка при потоковой загрузке (строк)
+  chunk_size: 50000
+
+# ====== Модель ======
+model:
+  # Архитектура MLP: [input_dim, hidden_1, hidden_2, hidden_3, hidden_4, 1]
+  hidden_dims: [256, 128, 64, 32]
+  dropout: 0.3
+  # Путь сохранения весов
+  save_path: "${ARTIFACTS_DIR}/models/gazprom_emergency_model.pth"
+
+# ====== Обучение ======
+training:
+  # Оптимизатор: "adam" | "custom_sao" | "rmsprop"
+  optimizer: "adam"
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 50
+  batch_size: 256
+  # Балансировка классов
+  use_smote: true
+  smote_sampling_strategy: 0.5
+  # Разделение train/val
+  test_size: 0.2
+  random_state: 42
+  # Early stopping
+  early_stopping_patience: 7
+
+# ====== Предсказание ======
+prediction:
+  # Порог бинарной классификации
+  threshold: 0.5
+  # Горизонт прогноза (часов)
+  horizon_hours: 3
+  # Путь для сохранения предсказаний
+  output_path: "${ARTIFACTS_DIR}/predictions/gazprom_emergency_predictions.csv"
