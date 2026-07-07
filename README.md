@@ -98,10 +98,6 @@ f:\Work\Gazprom\
 │   ├── params.xlsx                        # Справочник параметров
 │   └── repairs.xlsx                       # Журнал ремонтов
 │
-├── docs/                                  # Документация
-│   ├── mathematical_model.docx            # Математическая модель
-│   └── project_presentation.pptx          # Презентация проекта
-│
 ├── legacy/                                # Архив экспериментальных скриптов (15 файлов)
 │   ├── main_stpa_stochastic_optimizer.py
 │   ├── main_stpa5000_stochastic_optimizer.py
