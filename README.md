@@ -4,6 +4,13 @@
   <strong>Машинное обучение для предсказания аварийных ситуаций по телеметрии</strong>
 </p>
 
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white">
+  <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-%E2%89%A52.1-red?logo=pytorch&logoColor=white">
+  <img alt="Status" src="https://img.shields.io/badge/Status-Research%2FPrototype-orange">
+  <img alt="License" src="https://img.shields.io/badge/License-Internal-lightgrey">
+</p>
+
 ---
 
 ## 📋 Содержание
@@ -23,6 +30,10 @@
 - [Артефакты](#-артефакты)
 - [Архив экспериментов (legacy)](#-архив-экспериментов-legacy)
 - [Документация](#-документация)
+- [Воспроизводимость](#-воспроизводимость)
+- [Устранение неисправностей](#-устранение-неисправностей)
+- [Разработка](#-разработка)
+- [Лицензия](#-лицензия)
 
 ---
 
@@ -537,3 +548,175 @@ Polars LazyFrame + memmap (projects/) ← текущая архитектура
 - **GPU:** При наличии CUDA-совместимого GPU обучение автоматически переключается на GPU (`torch.cuda.is_available()`).
 - **Воспроизводимость:** Фиксированный `random_state=42` обеспечивает воспроизводимость разбиения и SMOTE.
 - **Масштабируемость:** Архитектура на Polars + memmap позволяет обрабатывать файлы, превышающие объём ОЗУ.
+
+---
+
+## 🎲 Воспроизводимость
+
+### Детерминированность
+
+Проект стремится к полной воспроизводимости результатов обучения:
+
+| Источник | Фиксация | Где |
+|---|---|---|
+| Разбиение train/test | `random_state=42` | `train.py` → `train_test_split(..., stratify=y)` |
+| SMOTE | `random_state=42` | `train.py` → `SMOTE(random_state=...)` |
+| Конфигурация | `config.yaml` под версионным контролем | Все гиперпараметры в Git |
+| Веса инициализации | PyTorch seed не фиксируется по умолчанию | ⚠️ Для полной детерминированности добавьте `torch.manual_seed(42)` |
+
+### Рекомендации для полной воспроизводимости
+
+Добавьте в начало скрипта обучения:
+
+```python
+import torch
+import numpy as np
+import random
+
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+```
+
+> ⚠️ Полная детерминированность на GPU не гарантируется из-за недетерминированных CUDA-операций.
+
+---
+
+## 🛠 Устранение неисправностей
+
+<details>
+<summary><b>🔹 FileNotFoundError: opers file not found</b></summary>
+
+**Причина:** Переменная окружения `DATA_DIR` не задана или указывает на несуществующий путь.
+
+**Решение:** Проверьте значение переменной:
+
+```bash
+# PowerShell
+echo $env:DATA_DIR
+
+# Linux/Mac
+echo $DATA_DIR
+```
+
+Убедитесь, что файлы `opers.csv` и `stpa.csv` существуют в указанной директории.
+</details>
+
+<details>
+<summary><b>🔹 RuntimeError: CUDA out of memory</b></summary>
+
+**Причина:** Недостаточно видеопамяти для обучения с текущим `batch_size`.
+
+**Решение:** Уменьшите `batch_size` в `config.yaml`:
+
+```yaml
+training:
+  batch_size: 64   # или 32
+```
+
+Альтернативно — используйте CPU, удалив/закомментировав строку `.to(device)`.
+</details>
+
+<details>
+<summary><b>🔹 Polars: not enough memory</b></summary>
+
+**Причина:** Polars требуется память для оптимизатора запросов.
+
+**Решение:** Уменьшите `chunk_size` в `config.yaml`:
+
+```yaml
+data:
+  chunk_size: 10000   # по умолчанию 50000
+```
+</details>
+
+<details>
+<summary><b>🔹 SMOTE: ValueError (недостаточно образцов минорного класса)</b></summary>
+
+**Причина:** Слишком мало примеров положительного класса для синтеза.
+
+**Решение:** Снизьте `smote_sampling_strategy` (например, до `0.3`) или увеличьте объём данных.
+</details>
+
+<details>
+<summary><b>🔹 ValueError: Found input variables with inconsistent numbers of samples</b></summary>
+
+**Причина:** Несоответствие размерностей `X` и `y` после merge.
+
+**Решение:** Проверьте, что ключи `batch_time` / `date` совпадают по формату и типу в обоих файлах. Убедитесь, что разделитель CSV корректный (`,` для основного пайплайна).
+</details>
+
+---
+
+## 👨‍💻 Разработка
+
+### Запуск из исходников
+
+```bash
+# Установить в режиме разработки (editable)
+pip install -e .
+
+# Или запустить как модуль напрямую
+python -m projects.gazprom_emergency --help
+```
+
+### Структура модуля
+
+```python
+projects.gazprom_emergency
+├── config.py    → load_config(path) → Config (dataclass)
+├── data.py      → merge_to_memmap(cfg), load_memmap(...)
+├── model.py     → EmergencyPredictor, build_model(), save/load_model()
+├── train.py     → train(cfg_path) — полный цикл обучения
+├── predict.py   → predict_batch(cfg_path, input_csv) — инференс
+└── __main__.py  → CLI: train | predict
+```
+
+### Добавление нового оптимизатора
+
+1. Расширьте блок выбора оптимизатора в `train.py`:
+
+```python
+elif optimizer_name == "sgd":
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=cfg.training.learning_rate,
+        momentum=0.9,
+    )
+```
+
+2. Добавьте имя в конфигурацию:
+
+```yaml
+training:
+  optimizer: "sgd"
+```
+
+### Рекомендации по расширению
+
+- **Новые признаки:** Добавляйте колонки с префиксом `v_` — они автоматически подхватятся `_feature_columns()`.
+- **Новые модели:** Реализуйте класс, наследуемый от `nn.Module`, и добавьте фабричную функцию в `model.py`.
+- **Логирование:** Используйте `logging.getLogger(__name__)` для согласованности с существующим кодом.
+- **Тестирование:** Перед коммитом убедитесь, что пайплайн запускается на небольшом сэмпле данных.
+
+---
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией **для внутреннего использования** (Internal / Proprietary).
+
+- ✅ Разрешено: использование внутри организации
+- ❌ Запрещено: публичное распространение, коммерческая передача третьим лицам
+
+Для вопросов лицензирования обратитесь к владельцу репозитория.
+
+---
+
+<p align="center">
+  <sub>© 2024 Gazprom ML. Прогнозирование аварий на объектах газоснабжения.</sub>
+</p>
