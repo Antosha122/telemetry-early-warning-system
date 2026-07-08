@@ -52,6 +52,7 @@ artifacts/datasets/
 # Исходные большие датасеты (opers.csv ~186MB, stpa5000.csv ~22MB и т.д.)
 # Файлы превышают лимит GitHub (100MB) — используйте DVC или внешнее хранилище
 Data/
+docs/
 artifacts/models/
 artifacts/predictions/
 artifacts/logs/
