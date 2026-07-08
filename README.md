@@ -322,10 +322,10 @@ python -m projects.gazprom_emergency predict \
 │              np.memmap (X_merged.npy, y_merged.npy)                  │
 │              (стриминг чанками по 50 000 строк)                      │
 │                                                                      │
-│  3. ПРЕДОБРАБОТКА (train.py)                                         │
-│     ├── train_test_split (stratified, test_size=0.2)                │
-│     ├── MinMaxScaler (fit на train, transform на test)              │
-│     └── SMOTE (oversampling минорного класса на train)              │
+│  3. ПРЕДОБРАБОТКА (train.py, dataset.py)                             │
+│     ├── Хронологический split по batch_time (без data leakage)      │
+│     ├── MinMaxScaler (инкрементальный fit на train, чанками)        │
+│     └── SMOTE (oversampling минорного класса только на train)       │
 │                                                                      │
 │  4. ОБУЧЕНИЕ (train.py)                                              │
 │     ├── DataLoader (batch_size=256, shuffle)                        │
@@ -340,8 +340,8 @@ python -m projects.gazprom_emergency predict \
 │     └── Confusion Matrix + Classification Report                    │
 │                                                                      │
 │  6. СОХРАНЕНИЕ                                                        │
-│     ├── model.pth (веса)                                            │
-│     └── model.scaler.pkl (MinMaxScaler)                             │
+│     ├── model.pth (веса + метаданные архитектуры)                  │
+│     └── model.scaler.json (MinMaxScaler, безопасный JSON)          │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -540,8 +540,9 @@ Polars LazyFrame + memmap (projects/) ← текущая архитектура
 
 - **Разделитель CSV:** Файл `stpa5000 (2).csv` использует `;` как разделитель. Основной пайплайн (`data.py`) ожидает стандартный `,` — убедитесь, что данные приведены к единому формату.
 - **GPU:** При наличии CUDA-совместимого GPU обучение автоматически переключается на GPU (`torch.cuda.is_available()`).
-- **Воспроизводимость:** Фиксированный `random_state=42` обеспечивает воспроизводимость разбиения и SMOTE.
+- **Воспроизводимость:** Глобальный `seed=42` фиксирует `torch`, `numpy`, `random` и `cudnn.deterministic` — воспроизводимость весов, разбиения и SMOTE.
 - **Масштабируемость:** Архитектура на Polars + memmap позволяет обрабатывать файлы, превышающие объём ОЗУ.
+- **Безопасность:** Модель загружается через `weights_only=True` (защита от RCE); scaler сериализуется в JSON (не pickle).
 
 ---
 
@@ -549,35 +550,33 @@ Polars LazyFrame + memmap (projects/) ← текущая архитектура
 
 ### Детерминированность
 
-Проект стремится к полной воспроизводимости результатов обучения:
+Проект обеспечивает полную воспроизводимость результатов обучения через `set_seed()` в `utils.py`:
 
 | Источник | Фиксация | Где |
 |---|---|---|
-| Разбиение train/test | `random_state=42` | `train.py` → `train_test_split(..., stratify=y)` |
+| Разбиение train/val | `split_strategy: "chronological"` | `train.py` → `chronological_split_indices()` |
 | SMOTE | `random_state=42` | `train.py` → `SMOTE(random_state=...)` |
 | Конфигурация | `config.yaml` под версионным контролем | Все гиперпараметры в Git |
-| Веса инициализации | PyTorch seed не фиксируется по умолчанию | ⚠️ Для полной детерминированности добавьте `torch.manual_seed(42)` |
+| Веса инициализации | `torch.manual_seed(42)` | `train.py` → `set_seed(cfg.training.seed)` |
+| NumPy / random | `np.random.seed`, `random.seed` | `utils.py` → `set_seed()` |
+| cuDNN | `cudnn.deterministic=True` | `utils.py` → `set_seed()` |
 
-### Рекомендации для полной воспроизводимости
+### Как это работает
 
-Добавьте в начало скрипта обучения:
+При старте обучения вызывается `set_seed(cfg.training.seed)` (по умолчанию 42), который фиксирует все источники случайности:
 
 ```python
-import torch
-import numpy as np
-import random
-
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# utils.py — вызывается в начале train()
+set_seed(42)
+# → random.seed(42)
+# → np.random.seed(42)
+# → torch.manual_seed(42)
+# → torch.cuda.manual_seed_all(42)
+# → torch.backends.cudnn.deterministic = True
+# → torch.backends.cudnn.benchmark = False
 ```
 
-> ⚠️ Полная детерминированность на GPU не гарантируется из-за недетерминированных CUDA-операций.
+> ⚠️ Полная детерминированность на GPU не гарантируется из-за недетерминированных CUDA-операций. Для 100% детерминированности используйте CPU.
 
 ---
 
@@ -664,10 +663,12 @@ python -m projects.gazprom_emergency --help
 ```python
 projects.gazprom_emergency
 ├── config.py    → load_config(path) → Config (dataclass)
-├── data.py      → merge_to_memmap(cfg), load_memmap(...)
-├── model.py     → EmergencyPredictor, build_model(), save/load_model()
-├── train.py     → train(cfg_path) — полный цикл обучения
-├── predict.py   → predict_batch(cfg_path, input_csv) — инференс
+├── data.py      → merge_to_memmap(cfg), load_memmap(...), load_batch_times(...)
+├── dataset.py   → MemmapDataset, chronological_split_indices()
+├── model.py     → EmergencyPredictor, build_model(), save/load_model() (weights_only=True)
+├── train.py     → train(cfg_path) — модульный цикл обучения (9 функций)
+├── predict.py   → predict_batch(cfg_path, input_csv) — безопасный инференс
+├── utils.py     → set_seed(), save/load_scaler_json(), fit_minmax_incremental()
 └── __main__.py  → CLI: train | predict
 ```
 
