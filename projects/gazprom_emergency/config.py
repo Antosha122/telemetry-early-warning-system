@@ -38,8 +38,15 @@ class TrainingConfig:
     batch_size: int = 256
     use_smote: bool = True
     smote_sampling_strategy: float = 0.5
+    # Разделение train/val
     test_size: float = 0.2
+    split_strategy: str = "chronological"  # "chronological" | "random"
     random_state: int = 42
+    seed: int = 42  # глобальный seed для воспроизводимости
+    # DataLoader
+    num_workers: int = 0
+    pin_memory: bool = True
+    # Early stopping
     early_stopping_patience: int = 7
 
 
