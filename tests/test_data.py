@@ -55,6 +55,18 @@ class TestFeatureColumns:
 # merge_to_memmap
 # ============================================================
 
+def _make_test_cfg(source_dir: Path, processed_dir: Path) -> DataConfig:
+    """DataConfig для тестов: запятая в обоих CSV, без leading ';'."""
+    return DataConfig(
+        source_dir=str(source_dir),
+        processed_dir=str(processed_dir),
+        chunk_size=10,
+        opers_separator=",",
+        stpa_separator=",",
+        stpa_skip_first_column=False,
+    )
+
+
 class TestMergeToMemmap:
     """Тестирует объединение opers + stpa в memmap."""
 
@@ -70,11 +82,7 @@ class TestMergeToMemmap:
         sample_opers_df.write_csv(source_dir / "opers.csv")
         sample_stpa_df.write_csv(source_dir / "stpa.csv")
 
-        cfg = DataConfig(
-            source_dir=str(source_dir),
-            processed_dir=str(processed_dir),
-            chunk_size=10,
-        )
+        cfg = _make_test_cfg(source_dir, processed_dir)
         x_path, y_path, n_features = merge_to_memmap(cfg)
 
         assert x_path.exists()
@@ -94,11 +102,7 @@ class TestMergeToMemmap:
         sample_opers_df.write_csv(source_dir / "opers.csv")
         sample_stpa_df.write_csv(source_dir / "stpa.csv")
 
-        cfg = DataConfig(
-            source_dir=str(source_dir),
-            processed_dir=str(processed_dir),
-            chunk_size=10,
-        )
+        cfg = _make_test_cfg(source_dir, processed_dir)
         x_path, y_path, n_features = merge_to_memmap(cfg)
 
         X, y = load_memmap(x_path, y_path, n_features)
@@ -123,11 +127,7 @@ class TestMergeToMemmap:
         sample_opers_df.write_csv(source_dir / "opers.csv")
         sample_stpa_df.write_csv(source_dir / "stpa.csv")
 
-        cfg = DataConfig(
-            source_dir=str(source_dir),
-            processed_dir=str(processed_dir),
-            chunk_size=10,
-        )
+        cfg = _make_test_cfg(source_dir, processed_dir)
         merge_to_memmap(cfg)
 
         t_path = processed_dir / "t_merged.npy"
