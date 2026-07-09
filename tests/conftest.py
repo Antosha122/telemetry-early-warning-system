@@ -33,12 +33,17 @@ def tmp_data_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def sample_opers_df():
-    """Возвращает миниатюрный DataFrame opers для тестов merge."""
+    """Возвращает миниатюрный DataFrame opers для тестов merge.
+
+    Реальный opers.csv содержит колонку ``date`` (не ``batch_time``) и
+    ``is_emergency`` как Boolean (true/false). В тестах используем ``date``
+    и целочисленный target — код сам приводит типы.
+    """
     import polars as pl
 
     return pl.DataFrame(
         {
-            "batch_time": [
+            "date": [
                 "2023-01-01 00:00:00",
                 "2023-01-01 03:00:00",
                 "2023-01-01 06:00:00",
