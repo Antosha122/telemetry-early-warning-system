@@ -62,18 +62,71 @@ def merge_to_memmap(cfg: DataConfig) -> tuple[Path, Path, int]:
 
     # --- Lazy load через Polars ---
     logger.info("Scanning %s and %s", opers_path, stpa_path)
-    opers = pl.scan_csv(opers_path, try_parse_dates=True)
-    stpa = pl.scan_csv(stpa_path, try_parse_dates=True)
+    opers_sep = getattr(cfg, "opers_separator", ",")
+    stpa_sep = getattr(cfg, "stpa_separator", ";")
+    logger.info("Scanning %s (sep=%r) and %s (sep=%r)", opers_path, opers_sep, stpa_path, stpa_sep)
+
+    # Имя колонки времени в opers (может быть "date" или "batch_time")
+    opers_join_col = getattr(cfg, "opers_join_column", "date")
+
+    # Читаем CSV. try_parse_dates=False — парсим даты явно ниже для контроля
+    # форматов. encoding="utf8-lossy" — реальные файлы могут содержать
+    # отдельные невалидные UTF-8 байты; lossy заменяет их на U+FFFD.
+    opers = pl.scan_csv(
+        opers_path, separator=opers_sep, try_parse_dates=False, encoding="utf8-lossy"
+    )
+    stpa = pl.scan_csv(
+        stpa_path, separator=stpa_sep, try_parse_dates=False, encoding="utf8-lossy"
+    )
 
     # Определяем число признаков по схеме stpa
     stpa_schema = stpa.collect_schema()
-    feat_cols = _feature_columns(dict(stpa_schema))
+    stpa_cols = list(stpa_schema.keys())
+    # Если включено stpa_skip_first_column и первая колонка пустая/без имени — удаляем
+    if getattr(cfg, "stpa_skip_first_column", False):
+        unnamed = [c for c in stpa_cols if c == "" or c.startswith("column_")]
+        if unnamed:
+            logger.info("Skipping unnamed columns: %s", unnamed)
+            stpa = stpa.drop(unnamed)
+            stpa_cols = [c for c in stpa_cols if c not in unnamed]
+
+    feat_cols = _feature_columns({c: str for c in stpa_cols})
     n_features = len(feat_cols)
     logger.info("Found %d feature columns (v_0 .. v_%d)", n_features, n_features - 1)
 
+    # --- Приводим колонки к нужным типам ---
+    # opers: колонку времени (date/batch_time) парсим как datetime.
+    #        is_emergency может быть Boolean (true/false) или int/float — кастуем в Float32.
+    opers_schema = opers.collect_schema()
+    if opers_join_col in opers_schema.keys():
+        opers = opers.with_columns(
+            pl.col(opers_join_col).str.strptime(pl.Datetime, strict=False).alias(COL_BATCH_TIME)
+        )
+    elif COL_BATCH_TIME not in opers_schema.keys():
+        raise ValueError(
+            f"Neither {opers_join_col!r} nor {COL_BATCH_TIME!r} found in opers.csv. "
+            f"Valid columns: {list(opers_schema.keys())}"
+        )
+
+    # is_emergency → Float32 (поддержка Boolean true/false, строковых "0"/"1" и чисел)
+    opers = opers.with_columns(pl.col(COL_IS_EMERGENCY).cast(pl.Float32))
+
+    # stpa: batch_time → datetime; все v_* → Float32 (пустые строки/NaN → null → 0.0)
+    stpa = stpa.with_columns(
+        pl.col(COL_BATCH_TIME).str.strptime(pl.Datetime, strict=False)
+    )
+    cast_exprs = [pl.col(c).cast(pl.Float32, strict=False) for c in feat_cols]
+    stpa = stpa.with_columns(cast_exprs)
+    # Заполняем null (из пустых ';;' в CSV) нулями для memmap
+    stpa = stpa.with_columns([pl.col(c).fill_null(0.0) for c in feat_cols])
+
     # Join: по batch_time берём is_emergency из opers и все v_* из stpa
     join_col = COL_BATCH_TIME
-    merged = stpa.join(opers.select([join_col, COL_IS_EMERGENCY]), on=join_col, how="inner")
+    merged = stpa.join(
+        opers.select([join_col, COL_IS_EMERGENCY]),
+        on=join_col,
+        how="inner",
+    )
 
     # --- Первый проход: определяем число строк ---
     logger.info("Counting rows (streaming)...")
@@ -117,6 +170,10 @@ def merge_to_memmap(cfg: DataConfig) -> tuple[Path, Path, int]:
     y_mm.flush()
     t_mm.flush()
     logger.info("Wrote %d rows to %s, %s and %s", offset, x_path, y_path, t_path)
+
+    # Сохраняем список признаков (единый источник правды для train/predict)
+    fc_path = processed_dir / FEATURE_COLUMNS_FILE
+    save_feature_columns(feat_cols, fc_path)
 
     return x_path, y_path, n_features
 
