@@ -5,51 +5,114 @@
 
 # ====== Пути к данным ======
 data:
-  # Каталог с исходными CSV (opers.csv, stpa.csv / stpa5000.csv)
-  source_dir: "${DATA_DIR}"
-  # Имена файлов
+  source_dir: "Data"
   opers_file: "opers.csv"
-  stpa_file: "stpa.csv"
-  # Каталог для обработанных чанков и memmap
-  processed_dir: "${ARTIFACTS_DIR}/datasets/gazprom_emergency/processed"
-  # Размер чанка при потоковой загрузке (строк)
+  stpa_file: "stpa5000 (2).csv"
+  processed_dir: "artifacts/datasets/gazprom_emergency/processed"
   chunk_size: 50000
+  # Разделители CSV
+  opers_separator: ","
+  stpa_separator: ";"
+  # У stpa-файла первая колонка пустая (начинается с ;) — пропускать её
+  stpa_skip_first_column: true
+  # Имя колонки времени в opers.csv (переименовывается в batch_time при merge)
+  opers_join_column: "date"
 
 # ====== Модель ======
 model:
-  # Архитектура MLP: [input_dim, hidden_1, hidden_2, hidden_3, hidden_4, 1]
+  architecture: "emergency_predictor"
   hidden_dims: [256, 128, 64, 32]
   dropout: 0.3
-  # Путь сохранения весов
-  save_path: "${ARTIFACTS_DIR}/models/gazprom_emergency_model.pth"
+  save_path: "artifacts/models/gazprom_emergency_model.pth"
 
 # ====== Обучение ======
 training:
-  # Оптимизатор: "adam" | "custom_sao" | "rmsprop"
   optimizer: "adam"
   learning_rate: 0.001
   weight_decay: 0.0001
-  epochs: 50
+  epochs: 10
   batch_size: 256
-  # Балансировка классов
-  use_smote: true
+  # SMOTE выключен: для сильно несбалансированных временных рядов
+  # cost-sensitive learning (pos_weight) надёжнее и не создаёт артефактов.
+  # Если включить SMOTE, установите pos_weight в небольшое значение (1..5),
+  # иначе будет двойная компенсация дисбаланса и модель выродится.
+  use_smote: false
   smote_sampling_strategy: 0.5
-  # Разделение train/val
   test_size: 0.2
-  split_strategy: "chronological"  # "chronological" (по batch_time) | "random"
+  split_strategy: "chronological"
   random_state: 42
-  seed: 42  # глобальный seed (torch, numpy, random, cudnn)
-  # DataLoader
+  seed: 42
   num_workers: 0
   pin_memory: true
-  # Early stopping
   early_stopping_patience: 7
+  # Cost-sensitive learning: вес положительного класса в BCEWithLogitsLoss
+  # None = авто (cost_fn / cost_fp = 100). Применяется только при use_smote=false,
+  # чтобы не было двойной компенсации дисбаланса.
+  pos_weight: null
+  # Масштабирование: "standard" (z-score) лучше для MLP с BatchNorm, чем MinMax
+  scaler_type: "standard"
+  # Gradient clipping защищает от взрыва градиентов при большом pos_weight
+  gradient_clip_norm: 1.0
+  # LR scheduler снижает шаг при стагнации val_loss
+  scheduler: "reduce_on_plateau"
+  scheduler_factor: 0.5
+  scheduler_patience: 3
+  scheduler_min_lr: 0.000001
 
 # ====== Предсказание ======
 prediction:
-  # Порог бинарной классификации
   threshold: 0.5
-  # Горизонт прогноза (часов)
   horizon_hours: 3
-  # Путь для сохранения предсказаний
-  output_path: "${ARTIFACTS_DIR}/predictions/gazprom_emergency_predictions.csv"
+  output_path: "artifacts/predictions/gazprom_emergency_predictions.csv"
+
+# ====== Валидация данных (#11) ======
+validation:
+  enabled: true
+  duplicate_keys_strategy: "fail"  # "fail" | "drop" | "aggregate"
+  nan_strategy: "fill_median"      # "fail" | "fill_mean" | "fill_median" | "fill_zero" | "drop"
+  inf_strategy: "replace_with_nan" # "fail" | "replace_with_nan"
+  max_nan_fraction_per_row: 0.9
+  max_join_multiplicity: 1.5
+  strict_binary_target: true
+  expected_feature_dtype: "float32"
+
+# ====== Feature engineering (#12) ======
+feature_engineering:
+  add_time_features: true
+  lag_sizes: [1, 3, 6]
+  rolling_windows: [3, 6, 12]
+  rolling_n_features: 50  # первые N признаков для лагов/rolling
+  pca_components: null    # null | float (e.g. 0.95) | int
+  keep_original_features: true
+
+# ====== Эксперименты (#13) ======
+experiment:
+  models_to_compare: ["mlp"]  # "mlp", "logreg", "random_forest", "xgboost", "lightgbm"
+  selection_metric: "pr_auc"  # "pr_auc" | "roc_auc" | "f1" | "recall" | "precision" | "cost"
+  cv_folds: 0                 # 0 = выключено
+  optuna_trials: 0            # 0 = выключено
+  optuna_model: "mlp"
+  optuna_timeout: 600
+
+# ====== Оптимизация порога (#14) ======
+threshold:
+  optimize: true
+  metric: "f1"               # "f1" | "recall_at_precision" | "cost" | "youden"
+  min_precision: 0.5
+  calibration: "none"        # "none" | "isotonic" | "sigmoid"
+  save_curves: true
+
+# ====== MLflow (#15) ======
+mlflow:
+  enabled: false
+  tracking_uri: ""
+  experiment_name: "gazprom_emergency"
+  registered_model_name: null
+  stage: "Staging"
+
+# ====== Стоимость ошибок (#17) ======
+cost_matrix:
+  cost_fn: 1000.0   # пропуск аварии
+  cost_fp: 10.0     # ложная тревога
+  benefit_tp: 990.0 # предотвращённая авария
+  benefit_tn: 0.0
