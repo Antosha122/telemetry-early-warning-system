@@ -1,15 +1,19 @@
 ﻿"""Обучение модели прогноза аварий.
 
-Архитектурные принципы (исправление замечаний senior review):
+Аритектурные принципы (исправление замечаний senior review):
 - Хронологическое разбиение по batch_time (без data leakage).
 - Работа поверх np.memmap по индексам (без загрузки всех данных в ОЗУ).
-- Инкрементальный fit MinMaxScaler (чанками).
+- Инкрементальный fit scaler'а (чанками) — StandardScaler или MinMaxScaler.
 - Фиксация всех seed'ов (torch, numpy, random, cudnn).
 - Безопасная сериализация артефактов (weights_only=True, JSON scaler).
 - Модульная структура: каждая функция тестируема независимо.
 - Оптимизаторы и модели через реестр (Registry Pattern).
-- Список признаков (feature_columns) сохраняется в чекпоинт — единый
-  источник правды для train/inference (решение замечания #7).
+- Cost-sensitive learning через pos_weight (#17) без двойной компенсации.
+- Gradient clipping и LR scheduler для стабильности обучения.
+- Предвычисление train-данных в память для скорости обучения.
+- Оптимизация порога после обучения (#14).
+- MLflow трекинг (#15).
+- Сохранение конфига рядом с моделью (#15).
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 
 from .config import Config
@@ -47,9 +52,11 @@ from .data import (
     merge_to_memmap,
 )
 from .dataset import MemmapDataset, chronological_split_indices
+from .mlflow_tracker import MLflowTracker, save_config_artifact
 from .model import build_model, save_model
 from .optimizers import build_optimizer
-from .utils import fit_minmax_incremental, save_scaler_json, set_seed
+from .threshold import optimize_threshold_pipeline
+from .utils import fit_scaler, save_scaler_json, set_seed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -60,12 +67,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 def prepare_data(cfg: Config) -> dict[str, Any]:
-    """Загружает/создаёт memmap-данные и возвращает пути и размерности.
-
-    Returns:
-        Словарь с ключами: x_path, y_path, t_path, n_features, n_rows,
-        feature_columns.
-    """
+    """Загружает/создаёт memmap-данные и возвращает пути и размерности."""
     from .data import get_processed_paths
 
     x_path, y_path, t_path = get_processed_paths(cfg.data)
@@ -76,14 +78,11 @@ def prepare_data(cfg: Config) -> dict[str, Any]:
         x_path, y_path, n_features = merge_to_memmap(cfg.data)
         n_rows = _count_rows(y_path)
     else:
-        # Определяем n_features из memmap по форме
         n_rows, n_features = _infer_shape(x_path)
 
-    # Загружаем список признаков (единый источник правды)
     if fc_path.exists():
         feature_columns = load_feature_columns(fc_path)
     else:
-        # Fallback: генерируем имена по n_features (обратная совместимость)
         logger.warning(
             "%s not found, generating feature names from n_features=%d",
             FEATURE_COLUMNS_FILE,
@@ -115,11 +114,7 @@ def prepare_data(cfg: Config) -> dict[str, Any]:
 
 
 def _infer_shape(x_path: Path) -> tuple[int, int]:
-    """Определяет (n_rows, n_features) из размера файла X memmap.
-
-    Поскольку размер файла = n_rows * n_features * 4 байта, но без метаданных
-    нельзя однозначно разделить — используем ассоциированный y_path для n_rows.
-    """
+    """Определяет (n_rows, n_features) из размера файла X memmap."""
     n_rows = _count_rows(x_path.parent / "y_merged.npy")
     n_features = x_path.stat().st_size // (4 * n_rows)
     return n_rows, n_features
@@ -137,11 +132,7 @@ def _count_rows(y_path: Path) -> int:
 def split_train_val(
     cfg: Config, data_info: dict[str, Any]
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Разбивает индексы на train/val по выбранной стратегии.
-
-    Returns:
-        (train_indices, val_indices).
-    """
+    """Разбивает индексы на train/val по выбранной стратегии."""
     x_path = data_info["x_path"]
     y_path = data_info["y_path"]
     n_features = data_info["n_features"]
@@ -156,7 +147,6 @@ def split_train_val(
             batch_times, cfg.training.test_size
         )
     elif cfg.training.split_strategy == "random":
-        # Fallback: случайное разбиение (не рекомендуется для временных данных)
         logger.warning(
             "Using random split — risk of data leakage for time-series data!"
         )
@@ -190,23 +180,13 @@ def apply_smote(
     cfg: Config,
     scaler: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Применяет SMOTE к обучающей выборке (с учётом scaler).
-
-    Важно: SMOTE применяется только к train, никогда к val.
-    Работает чанками: загружает train-данные порционно, применяет scaler,
-    затем запускает SMOTE.
-
-    Returns:
-        (X_resampled, y_resampled) — numpy-массивы в ОЗУ (допустимо, т.к.
-        SMOTE всё равно требует загрузки).
-    """
+    """Применяет SMOTE к обучающей выборке (с учётом scaler)."""
     logger.info("Applying SMOTE (sampling_strategy=%.2f)...", cfg.training.smote_sampling_strategy)
     smote = SMOTE(
         sampling_strategy=cfg.training.smote_sampling_strategy,
         random_state=cfg.training.random_state,
     )
 
-    # Загружаем train-данные чанками (с применением scaler)
     X_train = _load_train_chunked(X, train_idx, scaler, cfg.data.chunk_size)
     y_train = np.asarray(y[train_idx], dtype=np.float32)
 
@@ -238,12 +218,7 @@ def _load_train_chunked(
 
 
 # ============================================================
-# 4. Построение оптимизатора — см. optimizers.py (Registry Pattern)
-# ============================================================
-
-
-# ============================================================
-# 5. Цикл обучения (одна эпоха)
+# 4. Цикл обучения (одна эпоха)
 # ============================================================
 
 def train_one_epoch(
@@ -252,6 +227,7 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    gradient_clip_norm: float | None = None,
 ) -> float:
     """Обучает модель одну эпоху, возвращает средний loss."""
     model.train()
@@ -266,6 +242,12 @@ def train_one_epoch(
         logits = model(X_batch)
         loss = criterion(logits, y_batch)
         loss.backward()
+
+        if gradient_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=gradient_clip_norm
+            )
+
         optimizer.step()
 
         total_loss += loss.item() * X_batch.size(0)
@@ -275,7 +257,7 @@ def train_one_epoch(
 
 
 # ============================================================
-# 6. Валидация
+# 5. Валидация
 # ============================================================
 
 def validate(
@@ -312,7 +294,7 @@ def validate(
 
 
 # ============================================================
-# 7. Оценка и логирование метрик
+# 6. Оценка и логирование метрик
 # ============================================================
 
 def evaluate_and_log(
@@ -334,7 +316,7 @@ def evaluate_and_log(
 
 
 # ============================================================
-# 8. Сохранение артефактов
+# 7. Сохранение артефактов
 # ============================================================
 
 def save_artifacts(
@@ -344,14 +326,7 @@ def save_artifacts(
     feature_columns: list[str] | None = None,
     scaler: Any | None = None,
 ) -> None:
-    """Сохраняет модель (с метаданными) и scaler (JSON).
-
-    В чекпоинт сохраняется полный набор метаданных:
-    ``input_dim``, ``hidden_dims``, ``dropout``, ``feature_columns``,
-    ``n_features``, ``config_version`` — загрузка не требует ручного
-    знания архитектуры (решение замечания #7 senior review).
-    """
-    # Модель с метаданными архитектуры
+    """Сохраняет модель (с метаданными) и scaler (JSON)."""
     save_model(
         model,
         cfg.model.save_path,
@@ -364,26 +339,126 @@ def save_artifacts(
             "learning_rate": cfg.training.learning_rate,
             "split_strategy": cfg.training.split_strategy,
             "seed": cfg.training.seed,
+            "scaler_type": cfg.training.scaler_type,
+            "use_smote": cfg.training.use_smote,
+            "pos_weight_mode": cfg.training.pos_weight_mode,
+            "gradient_clip_norm": cfg.training.gradient_clip_norm,
+            "scheduler": cfg.training.scheduler,
         },
     )
 
-    # Scaler в JSON (без pickle)
     if scaler is not None:
         scaler_path = Path(cfg.model.save_path).with_suffix(".scaler.json")
         save_scaler_json(scaler, scaler_path)
 
 
 # ============================================================
-# 9. Основная функция обучения
+# 8. Вычисление pos_weight для cost-sensitive learning (#17)
+# ============================================================
+
+def compute_pos_weight(cfg: Config, y_train: np.ndarray | None = None) -> float:
+    """Вычисляет вес положительного класса для BCEWithLogitsLoss.
+
+    Три режима (cfg.training.pos_weight_mode):
+    - "statistical": из соотношения классов в train (negatives/positives).
+      Это стабильно для обучения — градиент не «взрывается» при больших весах.
+      Бизнес-стоимости учитываются позже, при оптимизации порога (#14).
+    - "cost_matrix": из cost_matrix (cost_fn / cost_fp). Может быть очень
+      большим (например 100) и дестабилизировать обучение.
+    - "explicit": используется явно заданное cfg.training.pos_weight.
+    """
+    mode = cfg.training.pos_weight_mode
+
+    if mode == "explicit" or cfg.training.pos_weight is not None:
+        pos_weight = float(cfg.training.pos_weight) if cfg.training.pos_weight else 1.0
+        logger.info("Explicit pos_weight=%.2f", pos_weight)
+        return pos_weight
+
+    if mode == "cost_matrix":
+        ratio = cfg.cost_matrix.cost_fn / max(cfg.cost_matrix.cost_fp, 1e-9)
+        logger.info(
+            "pos_weight=%.2f (cost_matrix: cost_fn=%.0f / cost_fp=%.0f)",
+            ratio,
+            cfg.cost_matrix.cost_fn,
+            cfg.cost_matrix.cost_fp,
+        )
+        return float(ratio)
+
+    if mode == "statistical":
+        if y_train is None:
+            logger.warning(
+                "pos_weight_mode='statistical' but y_train not provided. "
+                "Using pos_weight=1.0"
+            )
+            return 1.0
+        n_pos = float(np.sum(y_train == 1))
+        n_neg = float(np.sum(y_train == 0))
+        if n_pos == 0:
+            logger.warning("No positive samples in train. pos_weight=1.0")
+            return 1.0
+        ratio = n_neg / n_pos
+        logger.info(
+            "pos_weight=%.2f (statistical: neg=%d / pos=%d)",
+            ratio,
+            int(n_neg),
+            int(n_pos),
+        )
+        return float(ratio)
+
+    raise ValueError(f"Unknown pos_weight_mode: {mode!r}")
+
+
+# ============================================================
+# 9. Построение LR scheduler
+# ============================================================
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer, cfg: Config
+) -> Any | None:
+    """Создаёт LR scheduler по конфигурации."""
+    scheduler_name = cfg.training.scheduler
+    if scheduler_name == "none":
+        return None
+    if scheduler_name == "reduce_on_plateau":
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=cfg.training.scheduler_factor,
+            patience=cfg.training.scheduler_patience,
+            min_lr=cfg.training.scheduler_min_lr,
+        )
+        logger.info(
+            "ReduceLROnPlateau scheduler created (factor=%.2f, patience=%d)",
+            cfg.training.scheduler_factor,
+            cfg.training.scheduler_patience,
+        )
+        return scheduler
+    if scheduler_name == "cosine":
+        scheduler = CosineAnnealingLR(
+            optimizer, T_max=cfg.training.epochs
+        )
+        logger.info("CosineAnnealingLR scheduler created (T_max=%d)", cfg.training.epochs)
+        return scheduler
+    raise ValueError(f"Unknown scheduler: {scheduler_name!r}")
+
+
+# ============================================================
+# 10. Основная функция обучения
 # ============================================================
 
 def train(cfg_path: str) -> None:
-    """Полный цикл обучения: данные → split → scaler → SMOTE → модель → метрики."""
+    """Полный цикл обучения."""
     from .config import load_config
 
     cfg = load_config(cfg_path)
 
-    # --- Фиксация seed (воспроизводимость) ---
+    tracker = MLflowTracker(cfg.mlflow, cfg)
+    with tracker:
+        _train_inner(cfg, tracker)
+
+
+def _train_inner(cfg: Config, tracker: MLflowTracker) -> None:
+    """Внутренний цикл обучения (вызывается внутри MLflow context)."""
     set_seed(cfg.training.seed)
 
     # --- Данные ---
@@ -400,12 +475,18 @@ def train(cfg_path: str) -> None:
     train_idx, val_idx = split_train_val(cfg, data_info)
 
     # --- Scaler (инкрементальный fit на train) ---
-    scaler = fit_minmax_incremental(
+    scaler = fit_scaler(
         X,
         train_idx,
+        scaler_type=cfg.training.scaler_type,
         chunk_size=cfg.data.chunk_size,
-        feature_range=(0.0, 1.0),
     )
+
+    # --- y_train нужен для statistical pos_weight ---
+    y_train_np = np.asarray(y[train_idx], dtype=np.float32)
+
+    # --- Cost-sensitive learning ---
+    pos_weight = compute_pos_weight(cfg, y_train=y_train_np)
 
     # --- DataLoader для val (поверх memmap, ленивый scaler) ---
     val_ds = MemmapDataset(X, y, val_idx, scaler=scaler)
@@ -427,8 +508,22 @@ def train(cfg_path: str) -> None:
             torch.tensor(X_train_np, dtype=torch.float32),
             torch.tensor(y_train_np, dtype=torch.float32),
         )
+        del X_train_np
+    elif cfg.training.precompute_train:
+        # Предвычисление train-данных в память (с применённым scaler)
+        # это УСКОРЯЕТ обучение в ~10-50x, т.к. scaler.transform применяется
+        # один раз батчево, а не при каждой выборке в DataLoader.
+        logger.info("Precomputing train data into memory (scaler applied once)...")
+        X_train_np = _load_train_chunked(X, train_idx, scaler, cfg.data.chunk_size)
+        from torch.utils.data import TensorDataset
+
+        train_ds = TensorDataset(
+            torch.tensor(X_train_np, dtype=torch.float32),
+            torch.tensor(y_train_np, dtype=torch.float32),
+        )
+        del X_train_np
     else:
-        # Без SMOTE — работаем поверх memmap
+        # Ленивая обработка через memmap (медленнее)
         train_ds = MemmapDataset(X, y, train_idx, scaler=scaler)
 
     train_loader = DataLoader(
@@ -437,13 +532,20 @@ def train(cfg_path: str) -> None:
         shuffle=True,
         num_workers=cfg.training.num_workers,
         pin_memory=cfg.training.pin_memory and torch.cuda.is_available(),
+        # persistent_workers работает только при num_workers > 0
+        persistent_workers=cfg.training.num_workers > 0,
     )
 
     # --- Модель ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("Device: %s", device)
     model = build_model(n_features, cfg.model).to(device)
-    criterion = nn.BCEWithLogitsLoss()
+    pos_weight_tensor = torch.tensor([pos_weight], device=device)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
     optimizer = build_optimizer(model, cfg)
+
+    # --- LR scheduler ---
+    scheduler = build_scheduler(optimizer, cfg)
 
     # --- Цикл обучения ---
     best_loss = float("inf")
@@ -453,14 +555,28 @@ def train(cfg_path: str) -> None:
     all_true: list = []
 
     for epoch in range(cfg.training.epochs):
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            gradient_clip_norm=cfg.training.gradient_clip_norm,
+        )
 
         val_loss, all_preds, all_probs, all_true = validate(
             model, val_loader, criterion, device, cfg.prediction.threshold
         )
 
+        # Обновление LR scheduler
+        if scheduler is not None:
+            if isinstance(scheduler, ReduceLROnPlateau):
+                scheduler.step(val_loss)
+            else:
+                scheduler.step()
+
         logger.info(
-            "Epoch %d/%d | train_loss=%.4f val_loss=%.4f acc=%.4f f1=%.4f auc=%.4f",
+            "Epoch %d/%d | train_loss=%.4f val_loss=%.4f acc=%.4f f1=%.4f auc=%.4f lr=%.2e",
             epoch + 1,
             cfg.training.epochs,
             train_loss,
@@ -468,13 +584,25 @@ def train(cfg_path: str) -> None:
             accuracy_score(all_true, all_preds),
             f1_score(all_true, all_preds, zero_division=0),
             roc_auc_score(all_true, all_probs),
+            optimizer.param_groups[0]["lr"],
+        )
+
+        tracker.log_metrics(
+            {
+                "train_loss": float(train_loss),
+                "val_loss": float(val_loss),
+                "val_accuracy": float(accuracy_score(all_true, all_preds)),
+                "val_f1": float(f1_score(all_true, all_preds, zero_division=0)),
+                "val_roc_auc": float(roc_auc_score(all_true, all_probs)),
+                "lr": float(optimizer.param_groups[0]["lr"]),
+            },
+            step=epoch,
         )
 
         # Early stopping
         if val_loss < best_loss:
             best_loss = val_loss
             patience_counter = 0
-            # Сохраняем лучшую модель
             save_artifacts(model, cfg, n_features, feature_columns, scaler)
         else:
             patience_counter += 1
@@ -484,6 +612,28 @@ def train(cfg_path: str) -> None:
 
     # --- Финальные метрики ---
     evaluate_and_log(all_true, all_preds, all_probs)
+
+    # --- Оптимизация порога (#14) ---
+    all_true_arr = np.asarray(all_true)
+    all_probs_arr = np.asarray(all_probs)
+    curves_path = Path(cfg.model.save_path).parent / "roc_pr_curves.png"
+    threshold_result = optimize_threshold_pipeline(
+        y_true_val=all_true_arr,
+        y_proba_val=all_probs_arr,
+        cfg=cfg.threshold,
+        cost_matrix=cfg.cost_matrix,
+        curves_output_path=curves_path,
+    )
+    optimal_threshold = threshold_result["optimal_threshold"]
+    logger.info("Optimal threshold: %.4f", optimal_threshold)
+    tracker.log_metrics(threshold_result["metrics"])
+    if "curves_path" in threshold_result:
+        tracker.log_artifact(curves_path)
+
+    # --- Сохранение конфига рядом с моделью (#15) ---
+    config_path = Path(cfg.model.save_path).with_suffix(".config.json")
+    save_config_artifact(cfg, config_path)
+    tracker.log_artifact(config_path)
 
 
 def main():
