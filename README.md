@@ -227,24 +227,51 @@ set DATA_DIR=f:\Work\Gazprom\Data
 set ARTIFACTS_DIR=f:\Work\Gazprom\artifacts
 ```
 
+### Единый лаунчер (рекомендуемый способ)
+
+Самый простой способ запуска — единый лаунчер `run.py` с интерактивным меню:
+
+```bash
+python run.py
+```
+
+При запуске без аргументов открывается меню с выбором действия:
+1. Обучить модель
+2. Сделать предсказание
+3. Подготовить датасет (merge CSV → memmap)
+4. Оптимизация порога
+5. Сравнить модели
+6. Информация о проекте
+7. Запустить тесты
+
+На Windows можно использовать `run.bat` (двойной клик).
+
+Также доступен прямой запуск через CLI:
+
+```bash
+python run.py train                          # обучение
+python run.py predict                        # предсказание
+python run.py predict --input data.csv       # предсказание по конкретному файлу
+python run.py prepare                        # подготовка датасета
+python run.py compare                        # сравнение моделей
+python run.py info                           # информация о проекте
+python run.py test                           # запуск тестов
+```
+
 ### Обучение модели
 
 ```bash
-python -m projects.gazprom_emergency train \
-    --config projects/gazprom_emergency/config.yaml
+python run.py train
 ```
 
 ### Прогнозирование
 
 ```bash
 # По файлу телеметрии по умолчанию (из config.yaml)
-python -m projects.gazprom_emergency predict \
-    --config projects/gazprom_emergency/config.yaml
+python run.py predict
 
 # По пользовательскому файлу
-python -m projects.gazprom_emergency predict \
-    --config projects/gazprom_emergency/config.yaml \
-    --input path/to/new_telemetry.csv
+python run.py predict --input path/to/new_telemetry.csv
 ```
 
 ---
