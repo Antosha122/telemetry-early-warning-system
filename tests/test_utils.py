@@ -6,10 +6,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 from projects.gazprom_emergency.utils import (
     fit_minmax_incremental,
+    fit_scaler,
+    fit_standard_incremental,
     load_scaler_json,
     save_scaler_json,
     set_seed,
@@ -65,7 +67,7 @@ class TestSetSeed:
 
 
 # ============================================================
-# JSON scaler: save/load
+# JSON scaler: save/load (MinMaxScaler)
 # ============================================================
 
 class TestScalerJSON:
@@ -116,6 +118,51 @@ class TestScalerJSON:
         path = tmp_path / "deep" / "nested" / "dir" / "scaler.json"
         save_scaler_json(scaler, path)
         assert path.exists()
+
+
+# ============================================================
+# JSON scaler: save/load (StandardScaler)
+# ============================================================
+
+class TestStandardScalerJSON:
+    """Тестирует сериализацию StandardScaler через JSON."""
+
+    def test_save_and_load_roundtrip(self, tmp_path: Path):
+        """Save → load восстанавливает идентичный StandardScaler."""
+        X = np.array([[1, 10], [2, 20], [3, 30], [4, 40]], dtype=np.float32)
+        scaler = StandardScaler()
+        scaler.fit(X)
+
+        path = tmp_path / "test.scaler.json"
+        save_scaler_json(scaler, path)
+        loaded = load_scaler_json(path)
+
+        assert isinstance(loaded, StandardScaler)
+        np.testing.assert_array_almost_equal(scaler.mean_, loaded.mean_)
+        np.testing.assert_array_almost_equal(scaler.scale_, loaded.scale_)
+
+    def test_transform_produces_same_result(self, tmp_path: Path):
+        """Загруженный StandardScaler даёт тот же transform."""
+        X = np.array([[1, 10], [2, 20], [3, 30], [4, 40]], dtype=np.float32)
+        scaler = StandardScaler()
+        scaler.fit(X)
+
+        path = tmp_path / "test.scaler.json"
+        save_scaler_json(scaler, path)
+        loaded = load_scaler_json(path)
+
+        X_test = np.array([[2.5, 25], [3.5, 35]], dtype=np.float32)
+        np.testing.assert_array_almost_equal(
+            scaler.transform(X_test), loaded.transform(X_test)
+        )
+
+    def test_unsupported_scaler_raises(self, tmp_path: Path):
+        """Неподдерживаемый тип scaler вызывает TypeError."""
+        from sklearn.preprocessing import RobustScaler
+
+        scaler = RobustScaler().fit(np.array([[1, 2], [3, 4]]))
+        with pytest.raises(TypeError, match="Unsupported scaler type"):
+            save_scaler_json(scaler, tmp_path / "test.scaler.json")
 
 
 # ============================================================
@@ -187,3 +234,131 @@ class TestIncrementalFit:
         scaler = fit_minmax_incremental(X_mm, np.arange(3))
         # scale для константной колонки не должен быть inf/nan
         assert np.isfinite(scaler.scale_).all()
+
+
+# ============================================================
+# fit_standard_incremental — чанковый fit StandardScaler
+# ============================================================
+
+class TestStandardIncrementalFit:
+    """Тестирует инкрементальный fit StandardScaler."""
+
+    def test_incremental_matches_standard(self, tmp_path: Path):
+        """Инкрементальный StandardScaler даёт те же mean/std, что обычный."""
+        n_rows, n_features = 1000, 10
+        rng = np.random.RandomState(42)
+        data = rng.rand(n_rows, n_features).astype(np.float32) * 100
+
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=(n_rows, n_features))
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=(n_rows, n_features))
+
+        # Эталонный StandardScaler
+        standard_scaler = StandardScaler()
+        standard_scaler.fit(data)
+
+        # Инкрементальный fit
+        indices = np.arange(n_rows)
+        incremental_scaler = fit_standard_incremental(X_mm, indices, chunk_size=100)
+
+        np.testing.assert_array_almost_equal(
+            standard_scaler.mean_, incremental_scaler.mean_, decimal=4
+        )
+        np.testing.assert_array_almost_equal(
+            standard_scaler.scale_, incremental_scaler.scale_, decimal=4
+        )
+
+    def test_incremental_on_subset(self, tmp_path: Path):
+        """fit на подмножестве индексов считает статистику только по ним."""
+        data = np.array(
+            [[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [1000, 10000]],
+            dtype=np.float32,
+        )
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=data.shape)
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=data.shape)
+
+        # Только первые 5 строк
+        train_idx = np.arange(5)
+        scaler = fit_standard_incremental(X_mm, train_idx, chunk_size=2)
+
+        standard_scaler = StandardScaler()
+        standard_scaler.fit(data[:5])
+
+        np.testing.assert_array_almost_equal(
+            scaler.mean_, standard_scaler.mean_, decimal=4
+        )
+
+    def test_constant_column_no_division_by_zero(self, tmp_path: Path):
+        """Постоянная колонка не вызывает деления на ноль."""
+        data = np.array([[5, 1], [5, 2], [5, 3]], dtype=np.float32)
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=data.shape)
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=data.shape)
+
+        scaler = fit_standard_incremental(X_mm, np.arange(3))
+        assert np.isfinite(scaler.scale_).all()
+        # Для константной колонки scale_ должен быть 1.0 (1/1)
+        assert scaler.scale_[0] == 1.0
+
+
+# ============================================================
+# fit_scaler — универсальная фабрика
+# ============================================================
+
+class TestFitScalerFactory:
+    """Тестирует универсальную фабрику fit_scaler."""
+
+    def test_fit_scaler_standard(self, tmp_path: Path):
+        """fit_scaler(type='standard') возвращает StandardScaler."""
+        data = np.random.rand(100, 5).astype(np.float32)
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=data.shape)
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=data.shape)
+
+        scaler = fit_scaler(X_mm, np.arange(100), scaler_type="standard")
+        assert isinstance(scaler, StandardScaler)
+
+    def test_fit_scaler_minmax(self, tmp_path: Path):
+        """fit_scaler(type='minmax') возвращает MinMaxScaler."""
+        data = np.random.rand(100, 5).astype(np.float32)
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=data.shape)
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=data.shape)
+
+        scaler = fit_scaler(X_mm, np.arange(100), scaler_type="minmax")
+        assert isinstance(scaler, MinMaxScaler)
+
+    def test_fit_scaler_none(self, tmp_path: Path):
+        """fit_scaler(type='none') возвращает None (без масштабирования)."""
+        data = np.random.rand(100, 5).astype(np.float32)
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=data.shape)
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=data.shape)
+
+        scaler = fit_scaler(X_mm, np.arange(100), scaler_type="none")
+        assert scaler is None
+
+    def test_fit_scaler_unknown_raises(self, tmp_path: Path):
+        """Неизвестный scaler_type вызывает ValueError."""
+        data = np.random.rand(100, 5).astype(np.float32)
+        x_path = tmp_path / "X.npy"
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="w+", shape=data.shape)
+        X_mm[:] = data
+        X_mm.flush()
+        X_mm = np.memmap(x_path, dtype=np.float32, mode="r", shape=data.shape)
+
+        with pytest.raises(ValueError, match="Unknown scaler_type"):
+            fit_scaler(X_mm, np.arange(100), scaler_type="unknown")
