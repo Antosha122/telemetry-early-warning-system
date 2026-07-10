@@ -184,6 +184,11 @@ class PredictionConfig:
     threshold: float = 0.5
     horizon_hours: int = 3
     output_path: str = ""
+    # Прикреплять ли контекст из opers.csv (число операций, аварийных операций,
+    # ground-truth метку) к прогнозу. Помогает понимать, что модель предсказывает
+    # на уровне часа (batch_time), а не отдельной операции.
+    use_optimized_threshold: bool = True
+    attach_opers_context: bool = True
 
 
 @dataclass
