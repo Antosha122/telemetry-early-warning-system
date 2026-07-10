@@ -122,9 +122,6 @@ f:\Work\Gazprom\
 │   ├── test_ml_practices.py               # Тесты validation/features/baselines/threshold/pipeline
 │   └── __init__.py
 │
-├── docs/
-│   └── SENIOR_REVIEW.md                   # Архитектурный анализ и roadmap
-│
 ├── artifacts/                             # Большие файлы (git-ignored)
 │   ├── datasets/                          # Memmap-данные (X_merged.npy, y_merged.npy, t_merged.npy)
 │   ├── models/                            # Сохранённые модели (.pth) + scaler (.json) + config (.json)
