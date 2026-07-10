@@ -120,18 +120,43 @@ def merge_to_memmap(cfg: DataConfig) -> tuple[Path, Path, int]:
     # Заполняем null (из пустых ';;' в CSV) нулями для memmap
     stpa = stpa.with_columns([pl.col(c).fill_null(0.0) for c in feat_cols])
 
-    # Join: по batch_time берём is_emergency из opers и все v_* из stpa
+    # --- Дедупликация opers: агрегируем is_emergency по batch_time ---
+    # Это критически важно! В opers.csv миллионы строк с дублирующимися датами
+    # (разные операции на одной установке в один час). Без агреграции inner join
+    # создаёт декартово произведение: одинаковые фичи STPA × разные метки OPERS.
+    # Стратегия: если хоть одна операция в данный час аварийная → is_emergency=1.
+    opers_materialized = opers.collect(engine="streaming")
+    n_opers_before = len(opers_materialized)
+    opers_agg = (
+        opers_materialized.group_by(COL_BATCH_TIME)
+        .agg(pl.col(COL_IS_EMERGENCY).max())
+    )
+    logger.info(
+        "Aggregated opers by %s: %d rows → %d unique timestamps (is_emergency=max)",
+        COL_BATCH_TIME,
+        n_opers_before,
+        len(opers_agg),
+    )
+
+    # --- Дедупликация stpa: оставляем первую строку на каждый batch_time ---
+    # В stpa.csv могут быть дубликаты batch_time (разные brigade_id/metric_id).
+    # Для обучения нам нужна одна строка фичей на каждый момент времени.
+    stpa_materialized = stpa.collect(engine="streaming")
+    n_stpa_before = len(stpa_materialized)
+    stpa_unique = stpa_materialized.unique(subset=[COL_BATCH_TIME], keep="first")
+    logger.info(
+        "Deduplicated stpa: %d → %d unique batch_time rows", n_stpa_before, len(stpa_unique)
+    )
+
+    # --- Join: по batch_time (теперь оба датафрейма уникальны по ключу) ---
     join_col = COL_BATCH_TIME
-    merged = stpa.join(
-        opers.select([join_col, COL_IS_EMERGENCY]),
+    merged = stpa_unique.join(
+        opers_agg.select([join_col, COL_IS_EMERGENCY]),
         on=join_col,
         how="inner",
     )
-
-    # --- Первый проход: определяем число строк ---
-    logger.info("Counting rows (streaming)...")
-    n_rows = merged.select(pl.len()).collect(engine="streaming").item()
-    logger.info("Total rows: %d", n_rows)
+    logger.info("After join: %d rows", len(merged))
+    n_rows = len(merged)
 
     x_path = processed_dir / "X_merged.npy"
     y_path = processed_dir / "y_merged.npy"
@@ -144,16 +169,12 @@ def merge_to_memmap(cfg: DataConfig) -> tuple[Path, Path, int]:
     t_mm = np.memmap(t_path, dtype=np.int64, mode="w+", shape=(n_rows,))
 
     # --- Второй проход: собираем данные ---
-    logger.info("Writing memmap (streaming)...")
+    logger.info("Writing memmap...")
     offset = 0
     select_cols = feat_cols + [COL_IS_EMERGENCY, COL_BATCH_TIME]
 
-    # Стриминговый collect (Polars 1.x не поддерживает chunk_size в collect)
-    batches = merged.select(select_cols).collect(engine="streaming")
-
-    # Polars может вернуть один DataFrame или несколько; нормализуем
-    if isinstance(batches, pl.DataFrame):
-        batches = [batches]
+    # merged уже materialized DataFrame
+    batches = [merged.select(select_cols)]
 
     for batch in tqdm(batches, desc="Processing batches"):
         rows = batch.height
