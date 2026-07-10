@@ -10,7 +10,7 @@
   <img alt="Polars" src="https://img.shields.io/badge/Polars-%E2%89%A50.20-orange?logo=polars">
   <img alt="Status" src="https://img.shields.io/badge/Status-Production%20Ready-brightgreen">
   <img alt="Tests" src="https://img.shields.io/badge/Tests-pytest-success">
-  <img alt="License" src="https://img.shields.io/badge/License-Internal-lightgrey">
+  <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?logo=opensourceinitiative&logoColor=white">
 </p>
 
 ---
@@ -40,6 +40,7 @@
 - [Тестирование и качество кода](#-тестирование-и-качество-кода)
 - [Архив экспериментов (legacy)](#-архив-экспериментов-legacy)
 - [Разработка](#-разработка)
+- [Лицензия](#-лицензия)
 - [Устранение неисправностей](#-устранение-неисправностей)
 
 ---
@@ -76,6 +77,7 @@
 | **Воспроизводимость** | Фиксация seed (torch, numpy, random, cudnn) |
 | **Тестирование** | pytest + coverage |
 | **Линтеры** | ruff, mypy, pre-commit hooks |
+| **Лицензия** | MIT |
 | **Язык** | Python 3.10+ |
 
 ---
@@ -120,6 +122,9 @@ f:\Work\Gazprom\
 │   ├── test_ml_practices.py               # Тесты validation/features/baselines/threshold/pipeline
 │   └── __init__.py
 │
+├── docs/
+│   └── SENIOR_REVIEW.md                   # Архитектурный анализ и roadmap
+│
 ├── artifacts/                             # Большие файлы (git-ignored)
 │   ├── datasets/                          # Memmap-данные (X_merged.npy, y_merged.npy, t_merged.npy)
 │   ├── models/                            # Сохранённые модели (.pth) + scaler (.json) + config (.json)
@@ -135,6 +140,7 @@ f:\Work\Gazprom\
 ├── run.bat                                # Windows-лаунчер (двойной клик)
 ├── pyproject.toml                         # Упаковка пакета + ruff + mypy + pytest
 ├── .pre-commit-config.yaml                # pre-commit hooks (ruff, mypy)
+├── LICENSE                                # MIT License
 └── README.md
 ```
 
@@ -841,6 +847,36 @@ def _build_adamw(model, *, lr=0.001, weight_decay=0.01, **_):
 
 ---
 
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией **MIT**. Полный текст — в файле [`LICENSE`](LICENSE).
+
+```
+MIT License
+
+Copyright (c) 2024 Gazprom ML Team
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
 ## 🛠 Устранение неисправностей
 
 <details>
@@ -906,5 +942,5 @@ pip install xgboost lightgbm mlflow
 ---
 
 <p align="center">
-  <sub>© 2026 ML. Прогнозирование аварий на объектах газоснабжения.</sub>
+  <sub>© 2024 Gazprom ML Team. Распространяется под лицензией MIT.</sub>
 </p>
