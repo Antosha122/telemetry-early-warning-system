@@ -1,4 +1,4 @@
-# Gazprom ML — Прогнозирование аварий на объектах газоснабжения
+# GAZ ML — Прогнозирование аварий на объектах газоснабжения
 
 <p align="center">
   <strong>Production-ready ML-пайплайн для предсказания аварийных ситуаций по телеметрии</strong>
@@ -942,5 +942,5 @@ pip install xgboost lightgbm mlflow
 ---
 
 <p align="center">
-  <sub>© 2024 Gazprom ML Team. Распространяется под лицензией MIT.</sub>
+  <sub>© 2026 Burkin ML Team. Распространяется под лицензией MIT.</sub>
 </p>
