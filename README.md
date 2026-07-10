@@ -906,5 +906,5 @@ pip install xgboost lightgbm mlflow
 ---
 
 <p align="center">
-  <sub>© 2024 Gazprom ML. Прогнозирование аварий на объектах газоснабжения.</sub>
+  <sub>© 2026 ML. Прогнозирование аварий на объектах газоснабжения.</sub>
 </p>
