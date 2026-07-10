@@ -201,20 +201,37 @@ def _load_train_chunked(
     scaler: Any | None,
     chunk_size: int,
 ) -> np.ndarray:
-    """Загружает train-данные чанками, применяя scaler, в один numpy-массив."""
+    """Загружает train-данные чанками, применяя scaler, в один numpy-массив.
+
+    Важно: результат возвращается в исходном порядке ``train_idx`` (НЕ sorted).
+    Для эффективности чтения memmap мы сначала читаем по отсортированным
+    индексам (последовательный доступ быстрее случайного), а затем
+    возвращаем строки в исходный порядок через обратную перестановку.
+    """
     n_train = len(train_idx)
     n_features = X.shape[1]
-    X_out = np.empty((n_train, n_features), dtype=np.float32)
+    X_sorted = np.empty((n_train, n_features), dtype=np.float32)
 
+    # Сортируем индексы для последовательного чтения memmap (быстрее)
     sorted_idx = np.sort(train_idx)
+    # Запоминаем обратную перестановку: позиция в train_idx -> позиция в sorted
+    # argsort(sort(idx)) даёт обратную перестановку
+    inverse_perm = np.empty(n_train, dtype=np.int64)
+    # sorted_order[i] = позиция в sorted_idx, где находится train_idx[i]
+    # Эквивалент: inverse_perm = np.argsort(sorted_idx)  — нет!
+    # Нужен mapping: для каждого элемента train_idx найти его позицию в sorted_idx
+    positions = np.searchsorted(sorted_idx, train_idx)
+    inverse_perm = positions  # т.к. train_idx уникальны, searchsorted даёт точную позицию
+
     for start in range(0, n_train, chunk_size):
         end = min(start + chunk_size, n_train)
         chunk = np.asarray(X[sorted_idx[start:end]], dtype=np.float32)
         if scaler is not None:
             chunk = scaler.transform(chunk)
-        X_out[start:end] = chunk
+        X_sorted[start:end] = chunk
 
-    return X_out
+    # Возвращаем в исходном порядке train_idx
+    return X_sorted[inverse_perm]
 
 
 # ============================================================
@@ -325,8 +342,22 @@ def save_artifacts(
     n_features: int,
     feature_columns: list[str] | None = None,
     scaler: Any | None = None,
+    extra_overrides: dict[str, Any] | None = None,
 ) -> None:
-    """Сохраняет модель (с метаданными) и scaler (JSON)."""
+    """Saves model checkpoint + scaler. extra_overrides merges into extra dict."""
+    extra = {
+        "optimizer": cfg.training.optimizer,
+        "learning_rate": cfg.training.learning_rate,
+        "split_strategy": cfg.training.split_strategy,
+        "seed": cfg.training.seed,
+        "scaler_type": cfg.training.scaler_type,
+        "use_smote": cfg.training.use_smote,
+        "pos_weight_mode": cfg.training.pos_weight_mode,
+        "gradient_clip_norm": cfg.training.gradient_clip_norm,
+        "scheduler": cfg.training.scheduler,
+    }
+    if extra_overrides:
+        extra.update(extra_overrides)
     save_model(
         model,
         cfg.model.save_path,
@@ -334,17 +365,7 @@ def save_artifacts(
         cfg=cfg.model,
         feature_columns=feature_columns,
         n_features=n_features,
-        extra={
-            "optimizer": cfg.training.optimizer,
-            "learning_rate": cfg.training.learning_rate,
-            "split_strategy": cfg.training.split_strategy,
-            "seed": cfg.training.seed,
-            "scaler_type": cfg.training.scaler_type,
-            "use_smote": cfg.training.use_smote,
-            "pos_weight_mode": cfg.training.pos_weight_mode,
-            "gradient_clip_norm": cfg.training.gradient_clip_norm,
-            "scheduler": cfg.training.scheduler,
-        },
+        extra=extra,
     )
 
     if scaler is not None:
@@ -629,6 +650,12 @@ def _train_inner(cfg: Config, tracker: MLflowTracker) -> None:
     tracker.log_metrics(threshold_result["metrics"])
     if "curves_path" in threshold_result:
         tracker.log_artifact(curves_path)
+
+    # Re-save checkpoint with optimal_threshold so predict.py can use it
+    save_artifacts(
+        model, cfg, n_features, feature_columns, scaler,
+        extra_overrides={"optimal_threshold": float(optimal_threshold)},
+    )
 
     # --- Сохранение конфига рядом с моделью (#15) ---
     config_path = Path(cfg.model.save_path).with_suffix(".config.json")
