@@ -1,5 +1,7 @@
 # GAZ ML — Прогнозирование аварий на объектах газоснабжения
 
+https://burkinanton.ru/
+
 <p align="center">
   <strong>Production-ready ML-пайплайн для предсказания аварийных ситуаций по телеметрии</strong>
 </p>
